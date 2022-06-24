@@ -1,0 +1,28 @@
+--- dmenu.c
++++ dmenu.c
+@@ -519,14 +467,14 @@ paste(void)
+ }
+ 
+ static void
+-readstdin(FILE* stream)
++readstdin(void)
+ {
+ 	char buf[sizeof text], *p;
+ 	size_t i, imax = 0, size = 0;
+ 	unsigned int tmpmax = 0;
+ 
+ 	/* read each line from stdin and add it to the item list */
+-	for (i = 0; fgets(buf, sizeof buf, stream); i++) {
++	for (i = 0; fgets(buf, sizeof buf, stdin); i++) {
+ 		if (i + 1 >= size / sizeof *items)
+ 			if (!(items = realloc(items, (size += BUFSIZ))))
+ 				die("cannot realloc %u bytes:", size);
+@@ -544,7 +492,7 @@ readstdin(void)
+ 	if (items)
+ 		items[i].text = NULL;
+ 	inputw = items ? TEXTW(items[imax].text) : 0;
+-	lines = MIN(max_lines, i);
++	lines = MIN(lines, i);
+ }
+ 
+ static void
