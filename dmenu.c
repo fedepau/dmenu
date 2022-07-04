@@ -26,7 +26,7 @@
 #define TEXTW(X)              (drw_fontset_getwidth(drw, (X)) + lrpad)
 
 /* enums */
-enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; /* color schemes */
+enum { SchemeNorm, SchemeSel, SchemeOut, SchemeNormHighlight, SchemeSelHighlight, SchemeLast }; /* color schemes */
 
 struct item {
 	char *text;
@@ -44,6 +44,7 @@ static struct item *items = NULL;
 static struct item *matches, *matchend;
 static struct item *prev, *curr, *next, *sel;
 static int mon = -1, screen;
+static unsigned int max_lines = 0;
 
 static Atom clip, utf8;
 static Display *dpy;
@@ -130,6 +131,43 @@ cistrstr(const char *h, const char *n)
 	return NULL;
 }
 
+static void
+drawhighlights(struct item *item, int x, int y, int maxw)
+{
+	char restorechar, tokens[sizeof text], *highlight,  *token;
+	int indentx, highlightlen;
+
+	drw_setscheme(drw, scheme[item == sel ? SchemeSelHighlight : SchemeNormHighlight]);
+	strcpy(tokens, text);
+	for (token = strtok(tokens, " "); token; token = strtok(NULL, " ")) {
+		highlight = fstrstr(item->text, token);
+		while (highlight) {
+			// Move item str end, calc width for highlight indent, & restore
+			highlightlen = highlight - item->text;
+			restorechar = *highlight;
+			item->text[highlightlen] = '\0';
+			indentx = TEXTW(item->text);
+			item->text[highlightlen] = restorechar;
+
+			// Move highlight str end, draw highlight, & restore
+			restorechar = highlight[strlen(token)];
+			highlight[strlen(token)] = '\0';
+			if (indentx - (lrpad / 2) - 1 < maxw)
+				drw_text(
+					drw,
+					x + indentx - (lrpad / 2) - 1,
+					y,
+					MIN(maxw - indentx, TEXTW(highlight) - lrpad),
+					bh, 0, highlight, 0
+				);
+			highlight[strlen(token)] = restorechar;
+
+			if (strlen(highlight) - strlen(token) < strlen(token)) break;
+			highlight = fstrstr(highlight + strlen(token), token);
+		}
+	}
+}
+
 static int
 drawitem(struct item *item, int x, int y, int w)
 {
@@ -140,7 +178,9 @@ drawitem(struct item *item, int x, int y, int w)
 	else
 		drw_setscheme(drw, scheme[SchemeNorm]);
 
-	return drw_text(drw, x, y, w, bh, lrpad / 2, item->text, 0);
+	int r = drw_text(drw, x, y, w, bh, lrpad / 2, item->text, 0);
+	drawhighlights(item, x, y, w);
+	return r;
 }
 
 static void
@@ -241,6 +281,47 @@ grabkeyboard(void)
 	die("cannot grab keyboard");
 }
 
+static void readstdin(FILE* stream);
+
+static void
+refreshoptions()
+{
+	int dynlen = strlen(dynamic);
+	int cmdlen = dynlen + 4;
+	char *cmd;
+	char *c;
+	char *t = text;
+	while (*t)
+		cmdlen += *t++ == '\'' ? 4 : 1;
+	cmd = malloc(cmdlen);
+	if (cmd == NULL)
+		die("cannot malloc %u bytes:", cmdlen);
+	strcpy(cmd, dynamic);
+	t = text;
+	c = cmd + dynlen;
+	*(c++) = ' ';
+	*(c++) = '\'';
+	while (*t) {
+		// prefix ' with '\'
+		if (*t == '\'') {
+			*(c++) = '\'';
+			*(c++) = '\\';
+			*(c++) = '\'';
+		}
+		*(c++) = *(t++);
+	}
+	*(c++) = '\'';
+	*(c++) = 0;
+	FILE *stream = popen(cmd, "r");
+	if (!stream)
+		die("could not popen dynamic command (%s):", cmd);
+	readstdin(stream);
+	int r = pclose(stream);
+	if (r == -1)
+		die("could not pclose dynamic command");
+	free(cmd);
+}
+
 static void
 match(void)
 {
@@ -251,6 +332,16 @@ match(void)
 	int i, tokc = 0;
 	size_t len, textsize;
 	struct item *item, *lprefix, *lsubstr, *prefixend, *substrend;
+
+	if (dynamic) {
+		refreshoptions();
+		matches = matchend = NULL;
+		for (item = items; item && item->text; item++)
+			appenditem(item, &matches, &matchend);
+		curr = sel = matches;
+		calcoffsets();
+		return;
+	}
 
 	strcpy(buf, text);
 	/* separate input text into tokens to be matched individually */
@@ -605,13 +696,13 @@ paste(void)
 }
 
 static void
-readstdin(void)
+readstdin(FILE* stream)
 {
 	char buf[sizeof text], *p;
 	size_t i, size = 0;
 
 	/* read each line from stdin and add it to the item list */
-	for (i = 0; fgets(buf, sizeof buf, stdin); i++) {
+	for (i = 0; fgets(buf, sizeof buf, stream); i++) {
 		if (i + 1 >= size / sizeof *items)
 			if (!(items = realloc(items, (size += BUFSIZ))))
 				die("cannot realloc %zu bytes:", size);
@@ -623,7 +714,7 @@ readstdin(void)
 	}
 	if (items)
 		items[i].text = NULL;
-	lines = MIN(lines, i);
+	lines = MIN(max_lines, i);
 }
 
 static void
@@ -770,7 +861,8 @@ static void
 usage(void)
 {
 	fputs("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
-	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n", stderr);
+	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n"
+	      "             [-dy command]\n", stderr);
 	exit(1);
 }
 
@@ -817,6 +909,8 @@ main(int argc, char *argv[])
 			colors[SchemeSel][ColFg] = argv[++i];
 		else if (!strcmp(argv[i], "-w"))   /* embedding window id */
 			embed = argv[++i];
+		else if (!strcmp(argv[i], "-dy"))  /* dynamic command to run */
+			dynamic = argv[++i] && *argv[i] ? argv[i] : NULL;
 		else
 			usage();
 
@@ -841,11 +935,14 @@ main(int argc, char *argv[])
 		die("pledge");
 #endif
 
+	max_lines = lines;
 	if (fast && !isatty(0)) {
 		grabkeyboard();
-		readstdin();
+		if (!dynamic)
+			readstdin(stdin);
 	} else {
-		readstdin();
+		if (!dynamic)
+			readstdin(stdin);
 		grabkeyboard();
 	}
 	setup();
